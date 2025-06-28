@@ -1,8 +1,8 @@
-
 import streamlit as st
 import pandas as pd
 from fuzzywuzzy import fuzz
 import io
+import re
 
 st.set_page_config(page_title="GST Reconciliation Tool", layout="wide")
 st.title("📊 GST Reconciliation: GSTR-2B vs Purchase Register")
@@ -24,95 +24,95 @@ if purchase_file and gstr2b_file:
 
     st.success("✅ Files uploaded successfully!")
 
-    # Column selection interface
     st.subheader("🔧 Select Matching Columns")
 
     with st.form("column_selection"):
-        col_names = purchase_df.columns.tolist()
-        gstr2b_cols = gstr2b_df.columns.tolist()
+        pr_cols = purchase_df.columns.tolist()
+        g2b_cols = gstr2b_df.columns.tolist()
 
         st.markdown("### 🧾 Purchase Register Columns")
-        pr_invoice_col = st.selectbox("Invoice Number", col_names)
-        pr_party_col = st.selectbox("Party Name", col_names)
-        pr_amount_col = st.selectbox("Taxable Amount", col_names)
-        pr_gstin_col = st.selectbox("GSTIN (Optional)", ["None"] + col_names)
+        pr_inv_col = st.selectbox("Invoice Number", pr_cols)
+        pr_party_col = st.selectbox("Party Name", pr_cols)
+        pr_amt_col = st.selectbox("Taxable Amount", pr_cols)
+        pr_gst_col = st.selectbox("GSTIN (Optional)", ["None"] + pr_cols)
 
         st.markdown("### 📥 GSTR-2B Columns")
-        g2b_invoice_col = st.selectbox("Invoice Number (GSTR-2B)", gstr2b_cols)
-        g2b_party_col = st.selectbox("Party Name (GSTR-2B)", gstr2b_cols)
-        g2b_amount_col = st.selectbox("Taxable Amount (GSTR-2B)", gstr2b_cols)
-        g2b_gstin_col = st.selectbox("GSTIN (Optional, GSTR-2B)", ["None"] + gstr2b_cols)
+        g2b_inv_col = st.selectbox("Invoice Number (GSTR-2B)", g2b_cols)
+        g2b_party_col = st.selectbox("Party Name (GSTR-2B)", g2b_cols)
+        g2b_amt_col = st.selectbox("Taxable Amount (GSTR-2B)", g2b_cols)
+        g2b_gst_col = st.selectbox("GSTIN (Optional - GSTR-2B)", ["None"] + g2b_cols)
 
-        match_threshold = st.slider("🧠 Matching Strictness (Higher = Stricter)", min_value=50, max_value=100, value=80, step=1)
-
+        strictness = st.slider("🧠 Matching Strictness (% Fuzzy Score)", min_value=50, max_value=100, value=80, step=5)
         submit_btn = st.form_submit_button("🔄 Run Reconciliation")
 
     if submit_btn:
         st.info("🔍 Matching invoices...")
 
+        def clean_inv(inv, n=5):
+            return re.sub(r"\D", "", str(inv))[-n:]
+
         def clean_text(x):
-            if pd.isna(x):
-                return ""
-            return str(x).strip().lower().replace(" ", "").replace("-", "").replace("/", "")
+            return str(x).strip().lower()
 
-        purchase_df["_inv"] = purchase_df[pr_invoice_col].apply(clean_text)
-        purchase_df["_party"] = purchase_df[pr_party_col].astype(str).str.lower()
-        if pr_gstin_col != "None":
-            purchase_df["_gstin"] = purchase_df[pr_gstin_col].astype(str).str.lower()
+        purchase_df["_inv"] = purchase_df[pr_inv_col].apply(clean_inv)
+        gstr2b_df["_inv"] = gstr2b_df[g2b_inv_col].apply(clean_inv)
+        purchase_df["_party"] = purchase_df[pr_party_col].apply(clean_text)
+        gstr2b_df["_party"] = gstr2b_df[g2b_party_col].apply(clean_text)
 
-        gstr2b_df["_inv"] = gstr2b_df[g2b_invoice_col].apply(clean_text)
-        gstr2b_df["_party"] = gstr2b_df[g2b_party_col].astype(str).str.lower()
-        if g2b_gstin_col != "None":
-            gstr2b_df["_gstin"] = gstr2b_df[g2b_gstin_col].astype(str).str.lower()
+        if pr_gst_col != "None":
+            purchase_df["_gst"] = purchase_df[pr_gst_col].astype(str).str.strip().str.lower()
+        else:
+            purchase_df["_gst"] = ""
 
-        matched = []
-        unmatched_purchase = []
-        unmatched_gstr2b = gstr2b_df.copy()
+        if g2b_gst_col != "None":
+            gstr2b_df["_gst"] = gstr2b_df[g2b_gst_col].astype(str).str.strip().str.lower()
+        else:
+            gstr2b_df["_gst"] = ""
+
+        matched, unmatched_purchase, unmatched_gstr2b = [], [], gstr2b_df.copy()
 
         for _, pr_row in purchase_df.iterrows():
             pr_inv = pr_row["_inv"]
             pr_party = pr_row["_party"]
-            pr_amt = pr_row[pr_amount_col]
-            pr_gstin = pr_row["_gstin"] if pr_gstin_col != "None" else None
+            pr_amt = pr_row[pr_amt_col]
+            pr_gst = pr_row["_gst"]
 
             potential_matches = gstr2b_df[gstr2b_df["_inv"] == pr_inv]
-
             found = False
-            for _, g2b_row in potential_matches.iterrows():
-                score = fuzz.partial_ratio(pr_party, g2b_row["_party"])
-                g2b_amt = g2b_row[g2b_amount_col]
-                g2b_gstin = g2b_row["_gstin"] if g2b_gstin_col != "None" else None
 
+            for _, g2b_row in potential_matches.iterrows():
+                g2b_party = g2b_row["_party"]
+                g2b_amt = g2b_row[g2b_amt_col]
+                g2b_gst = g2b_row["_gst"]
+                party_score = fuzz.partial_ratio(pr_party, g2b_party)
                 try:
                     diff = abs(float(pr_amt) - float(g2b_amt))
                 except:
                     diff = 999999
 
-                gstin_match = pr_gstin == g2b_gstin if pr_gstin and g2b_gstin else True
-
-                if score >= match_threshold and diff <= 1000 and gstin_match:
+                if party_score >= strictness and diff <= 1000:
                     matched.append({
-                        "Invoice": pr_row[pr_invoice_col],
+                        "Invoice": pr_row[pr_inv_col],
                         "Party (Purchase)": pr_row[pr_party_col],
                         "Party (GSTR2B)": g2b_row[g2b_party_col],
                         "Amount (Purchase)": pr_amt,
                         "Amount (GSTR2B)": g2b_amt,
                         "Difference": diff,
-                        "GSTIN Match": gstin_match,
-                        "Fuzzy Score": score
+                        "GSTIN (Purchase)": pr_gst,
+                        "GSTIN (GSTR2B)": g2b_gst,
+                        "Fuzzy Match %": party_score
                     })
-                    unmatched_gstr2b = unmatched_gstr2b[unmatched_gstr2b[g2b_invoice_col] != g2b_row[g2b_invoice_col]]
+                    unmatched_gstr2b = unmatched_gstr2b[unmatched_gstr2b[g2b_inv_col] != g2b_row[g2b_inv_col]]
                     found = True
                     break
 
             if not found:
                 unmatched_purchase.append(pr_row)
 
-        st.success(f"✅ {len(matched)} Invoices Matched")
-        st.warning(f"⚠️ {len(unmatched_purchase)} Invoices Unmatched from Purchase Register")
-        st.warning(f"⚠️ {len(unmatched_gstr2b)} Invoices Unmatched from GSTR-2B")
+        st.success(f"✅ Matched Invoices: {len(matched)}")
+        st.warning(f"⚠️ Unmatched from Purchase Register: {len(unmatched_purchase)}")
+        st.warning(f"⚠️ Unmatched from GSTR-2B: {len(unmatched_gstr2b)}")
 
-        # Save to Excel
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
             pd.DataFrame(matched).to_excel(writer, index=False, sheet_name="Matched")
@@ -120,9 +120,4 @@ if purchase_file and gstr2b_file:
             unmatched_gstr2b.to_excel(writer, index=False, sheet_name="Unmatched_GSTR2B")
         output.seek(0)
 
-        st.download_button(
-            label="📥 Download Reconciliation Report",
-            data=output,
-            file_name="GST_Reconciliation_Result.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        st.download_button("📥 Download Reconciliation Report", output, "GST_Reconciliation_Result.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
